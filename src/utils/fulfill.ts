@@ -17,6 +17,7 @@ import type {
   AdvancedOrder,
   ConsiderationItem,
   ExchangeAction,
+  ExchangeActionC,
   InputCriteria,
   Order,
   OrderParameters,
@@ -24,7 +25,7 @@ import type {
   OrderUseCase,
   ContractMethodReturnType,
 } from "../types";
-import { getApprovalActions } from "./approval";
+import { getApprovalActions, getApprovalActionsC } from "./approval";
 import {
   BalancesAndApprovals,
   InsufficientApprovals,
@@ -49,6 +50,7 @@ import {
   totalItemsAmount,
 } from "./order";
 import { executeAllActions, getTransactionMethods } from "./usecase";
+import { Provider } from "@ethersproject/providers";
 
 /**
  * We should use basic fulfill order if the order adheres to the following criteria:
@@ -308,6 +310,147 @@ export async function fulfillBasicOrder({
   };
 }
 
+export async function fulfillBasicOrderC({
+  order,
+  seaportContract,
+  offererBalancesAndApprovals,
+  fulfillerBalancesAndApprovals,
+  timeBasedItemParams,
+  offererOperator,
+  fulfillerOperator,
+  signerAddress,
+  tips = [],
+  conduitKey = NO_CONDUIT,
+  domain,
+  provider,
+}: {
+  order: Order;
+  seaportContract: Seaport;
+  offererBalancesAndApprovals: BalancesAndApprovals;
+  fulfillerBalancesAndApprovals: BalancesAndApprovals;
+  timeBasedItemParams: TimeBasedItemParams;
+  offererOperator: string;
+  fulfillerOperator: string;
+  signerAddress: string;
+  tips?: ConsiderationItem[];
+  conduitKey: string;
+  domain?: string;
+  provider: Provider;
+}): Promise<
+  OrderUseCase<
+    ExchangeActionC<
+      ContractMethodReturnType<SeaportContract, "fulfillBasicOrder">
+    >
+  >
+> {
+  const { offer, consideration } = order.parameters;
+  const considerationIncludingTips = [...consideration, ...tips];
+
+  const offerItem = offer[0];
+  const [forOfferer, ...forAdditionalRecipients] = considerationIncludingTips;
+
+  const basicOrderRouteType =
+    offerAndConsiderationFulfillmentMapping[offerItem.itemType]?.[
+      forOfferer.itemType
+    ];
+
+  if (basicOrderRouteType === undefined) {
+    throw new Error(
+      "Order parameters did not result in a valid basic fulfillment"
+    );
+  }
+
+  const additionalRecipients = forAdditionalRecipients.map(
+    ({ startAmount, recipient }) => ({
+      amount: startAmount,
+      recipient,
+    })
+  );
+
+  const considerationWithoutOfferItemType = considerationIncludingTips.filter(
+    (item) => item.itemType !== offer[0].itemType
+  );
+
+  const totalNativeAmount = getSummedTokenAndIdentifierAmounts({
+    items: considerationWithoutOfferItemType,
+    criterias: [],
+    timeBasedItemParams: {
+      ...timeBasedItemParams,
+      isConsiderationItem: true,
+    },
+  })[ethers.constants.AddressZero]?.["0"];
+
+  const insufficientApprovals = validateBasicFulfillBalancesAndApprovals({
+    offer,
+    consideration: considerationIncludingTips,
+    offererBalancesAndApprovals,
+    fulfillerBalancesAndApprovals,
+    timeBasedItemParams,
+    offererOperator,
+    fulfillerOperator,
+  });
+
+  const basicOrderParameters: BasicOrderParametersStruct = {
+    offerer: order.parameters.offerer,
+    offererConduitKey: order.parameters.conduitKey,
+    zone: order.parameters.zone,
+    //  Note the use of a "basicOrderType" enum;
+    //  this represents both the usual order type as well as the "route"
+    //  of the basic order (a simple derivation function for the basic order
+    //  type is `basicOrderType = orderType + (4 * basicOrderRoute)`.)
+    basicOrderType: order.parameters.orderType + 4 * basicOrderRouteType,
+    offerToken: offerItem.token,
+    offerIdentifier: offerItem.identifierOrCriteria,
+    offerAmount: offerItem.endAmount,
+    considerationToken: forOfferer.token,
+    considerationIdentifier: forOfferer.identifierOrCriteria,
+    considerationAmount: forOfferer.endAmount,
+    startTime: order.parameters.startTime,
+    endTime: order.parameters.endTime,
+    salt: order.parameters.salt,
+    totalOriginalAdditionalRecipients:
+      order.parameters.consideration.length - 1,
+    signature: order.signature,
+    fulfillerConduitKey: conduitKey,
+    additionalRecipients,
+    zoneHash: order.parameters.zoneHash,
+  };
+
+  const payableOverrides = { value: totalNativeAmount };
+
+  const approvalActions = await getApprovalActionsC(
+    insufficientApprovals,
+    signerAddress,
+    provider
+  );
+
+  const exchangeAction = {
+    type: "exchange",
+    transactionMethods: getTransactionMethods(
+      seaportContract,
+      "fulfillBasicOrder",
+      [basicOrderParameters, payableOverrides],
+      domain
+    ),
+    transactionRequest: {
+      from: signerAddress,
+      to: seaportContract.address,
+      data: seaportContract.interface.encodeFunctionData("fulfillBasicOrder", [
+        basicOrderParameters,
+      ]),
+      value: totalNativeAmount,
+      nonce: await provider.getTransactionCount(signerAddress),
+    },
+  } as const;
+
+  const actions = [...approvalActions, exchangeAction] as const;
+
+  return {
+    actions,
+    executeAllActions: () =>
+      executeAllActions(actions) as Promise<ContractTransaction>,
+  };
+}
 export async function fulfillStandardOrder({
   order,
   unitsToFill = 0,
@@ -474,6 +617,224 @@ export async function fulfillStandardOrder({
           [orderAccountingForTips, conduitKey, payableOverrides],
           domain
         ),
+  } as const;
+
+  const actions = [...approvalActions, exchangeAction] as const;
+
+  return {
+    actions,
+    executeAllActions: () =>
+      executeAllActions(actions) as Promise<ContractTransaction>,
+  };
+}
+
+export async function fulfillStandardOrderC({
+  order,
+  unitsToFill = 0,
+  totalSize,
+  totalFilled,
+  offerCriteria,
+  considerationCriteria,
+  tips = [],
+  extraData,
+  seaportContract,
+  offererBalancesAndApprovals,
+  fulfillerBalancesAndApprovals,
+  offererOperator,
+  fulfillerOperator,
+  timeBasedItemParams,
+  conduitKey,
+  recipientAddress,
+  signerAddress,
+  domain,
+  provider,
+}: {
+  order: Order;
+  unitsToFill?: BigNumberish;
+  totalFilled: BigNumber;
+  totalSize: BigNumber;
+  offerCriteria: InputCriteria[];
+  considerationCriteria: InputCriteria[];
+  tips?: ConsiderationItem[];
+  extraData?: string;
+  seaportContract: Seaport;
+  offererBalancesAndApprovals: BalancesAndApprovals;
+  fulfillerBalancesAndApprovals: BalancesAndApprovals;
+  offererOperator: string;
+  fulfillerOperator: string;
+  conduitKey: string;
+  recipientAddress: string;
+  timeBasedItemParams: TimeBasedItemParams;
+  signerAddress: string;
+  domain?: string;
+  provider: Provider;
+}): Promise<
+  OrderUseCase<
+    ExchangeActionC<
+      ContractMethodReturnType<
+        SeaportContract,
+        "fulfillAdvancedOrder" | "fulfillOrder"
+      >
+    >
+  >
+> {
+  // If we are supplying units to fill, we adjust the order by the minimum of the amount to fill and
+  // the remaining order left to be fulfilled
+  const orderWithAdjustedFills = unitsToFill
+    ? mapOrderAmountsFromUnitsToFill(order, {
+        unitsToFill,
+        totalFilled,
+        totalSize,
+      })
+    : // Else, we adjust the order by the remaining order left to be fulfilled
+      mapOrderAmountsFromFilledStatus(order, {
+        totalFilled,
+        totalSize,
+      });
+
+  const {
+    parameters: { offer, consideration },
+  } = orderWithAdjustedFills;
+
+  const considerationIncludingTips = [...consideration, ...tips];
+
+  const offerCriteriaItems = offer.filter(({ itemType }) =>
+    isCriteriaItem(itemType)
+  );
+
+  const considerationCriteriaItems = considerationIncludingTips.filter(
+    ({ itemType }) => isCriteriaItem(itemType)
+  );
+
+  const hasCriteriaItems =
+    offerCriteriaItems.length > 0 || considerationCriteriaItems.length > 0;
+
+  if (
+    offerCriteriaItems.length !== offerCriteria.length ||
+    considerationCriteriaItems.length !== considerationCriteria.length
+  ) {
+    throw new Error(
+      "You must supply the appropriate criterias for criteria based items"
+    );
+  }
+
+  const totalNativeAmount = getSummedTokenAndIdentifierAmounts({
+    items: considerationIncludingTips,
+    criterias: considerationCriteria,
+    timeBasedItemParams: {
+      ...timeBasedItemParams,
+      isConsiderationItem: true,
+    },
+  })[ethers.constants.AddressZero]?.["0"];
+
+  const insufficientApprovals = validateStandardFulfillBalancesAndApprovals({
+    offer,
+    consideration: considerationIncludingTips,
+    offerCriteria,
+    considerationCriteria,
+    offererBalancesAndApprovals,
+    fulfillerBalancesAndApprovals,
+    timeBasedItemParams,
+    offererOperator,
+    fulfillerOperator,
+  });
+
+  const payableOverrides = { value: totalNativeAmount };
+
+  const approvalActions = await getApprovalActionsC(
+    insufficientApprovals,
+    signerAddress,
+    provider
+  );
+
+  const isGift = recipientAddress !== ethers.constants.AddressZero;
+
+  const useAdvanced = Boolean(unitsToFill) || hasCriteriaItems || isGift;
+
+  const orderAccountingForTips: OrderStruct = {
+    ...order,
+    parameters: {
+      ...order.parameters,
+      consideration: [...order.parameters.consideration, ...tips],
+      totalOriginalConsiderationItems: consideration.length,
+    },
+  };
+
+  const { numerator, denominator } = getAdvancedOrderNumeratorDenominator(
+    order,
+    unitsToFill
+  );
+
+  const exchangeAction = {
+    type: "exchange",
+    transactionMethods: useAdvanced
+      ? getTransactionMethods(
+          seaportContract,
+          "fulfillAdvancedOrder",
+          [
+            {
+              ...orderAccountingForTips,
+              numerator,
+              denominator,
+              extraData: extraData ?? "0x",
+            },
+            hasCriteriaItems
+              ? generateCriteriaResolvers({
+                  orders: [order],
+                  offerCriterias: [offerCriteria],
+                  considerationCriterias: [considerationCriteria],
+                })
+              : [],
+            conduitKey,
+            recipientAddress,
+            payableOverrides,
+          ],
+          domain
+        )
+      : getTransactionMethods(
+          seaportContract,
+          "fulfillOrder",
+          [orderAccountingForTips, conduitKey, payableOverrides],
+          domain
+        ),
+
+    transactionRequest: useAdvanced
+      ? {
+          from: signerAddress,
+          to: seaportContract.address,
+          data: seaportContract.interface.encodeFunctionData(
+            "fulfillAdvancedOrder",
+            [
+              {
+                ...orderAccountingForTips,
+                numerator,
+                denominator,
+                extraData: extraData ?? "0x",
+              },
+              hasCriteriaItems
+                ? generateCriteriaResolvers({
+                    orders: [order],
+                    offerCriterias: [offerCriteria],
+                    considerationCriterias: [considerationCriteria],
+                  })
+                : [],
+              conduitKey,
+              recipientAddress,
+            ]
+          ),
+          value: totalNativeAmount,
+          nonce: await provider.getTransactionCount(signerAddress),
+        }
+      : {
+          from: signerAddress,
+          to: seaportContract.address,
+          data: seaportContract.interface.encodeFunctionData("fulfillOrder", [
+            orderAccountingForTips,
+            conduitKey,
+          ]),
+          value: totalNativeAmount,
+          nonce: await provider.getTransactionCount(signerAddress),
+        },
   } as const;
 
   const actions = [...approvalActions, exchangeAction] as const;

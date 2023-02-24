@@ -16,7 +16,9 @@ import {
 } from "ethers";
 import { ItemType, OrderType } from "./constants";
 import type { ERC721 } from "./typechain/ERC721";
+import type { ERC1155 } from "./typechain/ERC1155";
 import type { ERC20 } from "./typechain/ERC20";
+import { TransactionRequest } from "@ethersproject/providers";
 
 export type SeaportConfig = {
   // Used because fulfillments may be invalid if confirmations take too long. Default buffer is 5 minutes
@@ -213,9 +215,30 @@ export type ApprovalAction = {
     | TransactionMethods<ContractMethodReturnType<ERC20, "approve">>;
 };
 
+export type ApprovalActionC = {
+  type: "approval";
+  token: string;
+  identifierOrCriteria: string;
+  itemType: ItemType;
+  operator: string;
+  transactionMethods:
+    | TransactionMethods<ContractMethodReturnType<ERC721, "setApprovalForAll">>
+    | TransactionMethods<ContractMethodReturnType<ERC1155, "setApprovalForAll">>
+    | TransactionMethods<ContractMethodReturnType<ERC20, "approve">>;
+
+  transactionRequest: TransactionRequest;
+};
+
 export type ExchangeAction<T = unknown> = {
   type: "exchange";
   transactionMethods: TransactionMethods<T>;
+};
+
+export type ExchangeActionC<T = unknown> = {
+  type: "exchange";
+  transactionMethods: TransactionMethods<T>;
+
+  transactionRequest: TransactionRequest;
 };
 
 export type CreateOrderAction = {
@@ -223,6 +246,12 @@ export type CreateOrderAction = {
   getMessageToSign: () => Promise<string>;
   createOrder: () => Promise<OrderWithCounter>;
 };
+
+// export type CreateOrderActionC = {
+//   type: "create";
+//   getMessageToSign: () => Promise<string>;
+//   createOrder: () => Promise<OrderWithCounter>;
+// };
 
 export type TransactionAction = ApprovalAction | ExchangeAction;
 
