@@ -7,7 +7,7 @@ import { ItemType, MAX_INT } from "../constants";
 import type { ERC20 } from "../typechain/ERC20";
 import type { ERC721 } from "../typechain/ERC721";
 import type { ERC1155 } from "../typechain/ERC1155";
-import type { ApprovalAction, ApprovalActionC, Item } from "../types";
+import type { ApprovalAction, ApprovalActionCustom, Item } from "../types";
 import type { InsufficientApprovals } from "./balanceAndApprovalCheck";
 import { isErc1155Item, isErc721Item } from "./item";
 import { getTransactionMethods } from "./usecase";
@@ -95,11 +95,11 @@ export function getApprovalActions(
   );
 }
 
-export function getApprovalActionsC(
+export function getApprovalActionsCustom(
   insufficientApprovals: InsufficientApprovals,
   signerAddress: string,
   provider: Provider
-): Promise<ApprovalActionC[]> {
+): Promise<ApprovalActionCustom[]> {
   return Promise.all(
     insufficientApprovals
       .filter(

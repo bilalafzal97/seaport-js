@@ -215,7 +215,7 @@ export type ApprovalAction = {
     | TransactionMethods<ContractMethodReturnType<ERC20, "approve">>;
 };
 
-export type ApprovalActionC = {
+export type ApprovalActionCustom = {
   type: "approval";
   token: string;
   identifierOrCriteria: string;
@@ -234,7 +234,7 @@ export type ExchangeAction<T = unknown> = {
   transactionMethods: TransactionMethods<T>;
 };
 
-export type ExchangeActionC<T = unknown> = {
+export type ExchangeActionCustom<T = unknown> = {
   type: "exchange";
   transactionMethods: TransactionMethods<T>;
 

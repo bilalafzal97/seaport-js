@@ -26,7 +26,7 @@ import type {
   OrderWithCounter,
   SeaportContract,
 } from "./types";
-import { getApprovalActionsC } from "./utils/approval";
+import { getApprovalActionsCustom } from "./utils/approval";
 import {
   getBalancesAndApprovals,
   validateOfferBalancesAndApprovals,
@@ -45,19 +45,21 @@ import { executeAllActions } from "./utils/usecase";
 import { Provider } from "@ethersproject/providers";
 import {
   ContractMethodReturnType,
-  ExchangeAction,
+  ExchangeActionCustom,
   InputCriteria,
   OrderStatus,
   TipInputItem,
 } from "./types";
 import {
-  fulfillBasicOrderC,
-  fulfillStandardOrderC,
+  fulfillAvailableOrdersCustom,
+  fulfillBasicOrderCustom,
+  FulfillOrdersMetadata,
+  fulfillStandardOrderCustom,
   shouldUseBasicFulfill,
   validateAndSanitizeFromOrderStatus,
 } from "./utils/fulfill";
 
-export class SeaportC {
+export class SeaportCustom {
   // Provides the raw interface to the contract for flexibility
   public contract: SeaportContract;
 
@@ -98,14 +100,6 @@ export class SeaportC {
     this.signerAddress = senderAddress;
     this.provider = provider;
 
-    // const provider =
-    //   providerOrSigner instanceof providers.Provider
-    //     ? providerOrSigner
-    //     : providerOrSigner.provider;
-    // this.signer = (providerOrSigner as Signer)._isSigner
-    //   ? (providerOrSigner as Signer)
-    //   : undefined;
-
     if (!provider) {
       throw new Error(
         "Either a provider or custom signer with provider must be provided"
@@ -142,18 +136,6 @@ export class SeaportC {
 
     this.defaultConduitKey = overrides?.defaultConduitKey ?? NO_CONDUIT;
   }
-
-  // private _getSigner(accountAddress?: string): Signer {
-  //   if (this.signer) {
-  //     return this.signer;
-  //   }
-  //
-  //   if (!(this.provider instanceof providers.JsonRpcProvider)) {
-  //     throw new Error("Either signer or a JsonRpcProvider must be provided");
-  //   }
-  //
-  //   return this.provider.getSigner(accountAddress);
-  // }
 
   /**
    * Returns the corresponding order type based on whether it allows partial fills and is restricted by zone
@@ -219,8 +201,6 @@ export class SeaportC {
     }: CreateOrderInput,
     accountAddress?: string
   ): Promise<OrderUseCase<CreateOrderAction>> {
-    // const signer = this._getSigner(accountAddress);
-
     if (this.signerAddress !== accountAddress) {
       throw new Error("Invalid account address");
     }
@@ -316,7 +296,11 @@ export class SeaportC {
       : [];
 
     const approvalActions = checkBalancesAndApprovals
-      ? await getApprovalActionsC(insufficientApprovals, offerer, this.provider)
+      ? await getApprovalActionsCustom(
+          insufficientApprovals,
+          offerer,
+          this.provider
+        )
       : [];
     const createOrderAction = {
       type: "create",
@@ -325,12 +309,6 @@ export class SeaportC {
       },
       createOrder: async () => {
         const signature = "";
-
-        // const signature = await this.signOrder(
-        //     orderParameters,
-        //     resolvedCounter,
-        //     offerer
-        // );
 
         return {
           parameters: { ...orderParameters, counter: resolvedCounter },
@@ -583,7 +561,7 @@ export class SeaportC {
     domain?: string;
   }): Promise<
     OrderUseCase<
-      ExchangeAction<
+      ExchangeActionCustom<
         ContractMethodReturnType<
           SeaportContract,
           "fulfillBasicOrder" | "fulfillOrder" | "fulfillAdvancedOrder"
@@ -663,7 +641,7 @@ export class SeaportC {
       shouldUseBasicFulfill(sanitizedOrder.parameters, totalFilled)
     ) {
       // TODO: Use fulfiller proxy if there are approvals needed directly, but none needed for proxy
-      return fulfillBasicOrderC({
+      return fulfillBasicOrderCustom({
         order: sanitizedOrder,
         seaportContract: this.contract,
         offererBalancesAndApprovals,
@@ -680,7 +658,7 @@ export class SeaportC {
     }
 
     // Else, we fallback to the standard fulfill order
-    return fulfillStandardOrderC({
+    return fulfillStandardOrderCustom({
       order: sanitizedOrder,
       unitsToFill,
       totalFilled,
@@ -699,6 +677,133 @@ export class SeaportC {
       signerAddress: fulfillerAddress,
       offererOperator,
       fulfillerOperator,
+      recipientAddress,
+      domain,
+      provider: this.provider,
+    });
+  }
+
+  /**
+   * Fulfills an order through best-effort fashion. Orders that fail will not revert the whole transaction
+   * unless there's an issue with approvals or balance checks
+   * @param input
+   * @param input.fulfillOrderDetails list of helper order details
+   * @param input.accountAddress the account to fulfill orders on
+   * @param input.conduitKey the key from which to source approvals from
+   * @param input.recipientAddress optional recipient to forward the offer to as opposed to the fulfiller.
+   *                               Defaults to the zero address which means the offer goes to the fulfiller
+   * @param input.domain optional domain to be hashed and appended to calldata
+   * @returns a use case containing the set of approval actions and fulfillment action
+   */
+  public async fulfillOrders({
+    fulfillOrderDetails,
+    accountAddress,
+    conduitKey = this.defaultConduitKey,
+    recipientAddress = ethers.constants.AddressZero,
+    domain = "",
+  }: {
+    fulfillOrderDetails: {
+      order: OrderWithCounter;
+      unitsToFill?: BigNumberish;
+      offerCriteria?: InputCriteria[];
+      considerationCriteria?: InputCriteria[];
+      tips?: TipInputItem[];
+      extraData?: string;
+    }[];
+    accountAddress?: string;
+    conduitKey?: string;
+    recipientAddress?: string;
+    domain?: string;
+  }) {
+    if (this.signerAddress !== accountAddress) {
+      throw new Error("Invalid account address");
+    }
+
+    const fulfillerAddress = accountAddress as string;
+
+    const allOffererOperators = fulfillOrderDetails.map(
+      ({ order }) =>
+        this.config.conduitKeyToConduit[order.parameters.conduitKey]
+    );
+
+    const fulfillerOperator = this.config.conduitKeyToConduit[conduitKey];
+
+    const allOfferItems = fulfillOrderDetails.flatMap(
+      ({ order }) => order.parameters.offer
+    );
+
+    const allConsiderationItems = fulfillOrderDetails.flatMap(
+      ({ order }) => order.parameters.consideration
+    );
+    const allOfferCriteria = fulfillOrderDetails.flatMap(
+      ({ offerCriteria = [] }) => offerCriteria
+    );
+    const allConsiderationCriteria = fulfillOrderDetails.flatMap(
+      ({ considerationCriteria = [] }) => considerationCriteria
+    );
+
+    const [
+      offerersBalancesAndApprovals,
+      fulfillerBalancesAndApprovals,
+      currentBlock,
+      orderStatuses,
+    ] = await Promise.all([
+      Promise.all(
+        fulfillOrderDetails.map(({ order, offerCriteria = [] }, i) =>
+          getBalancesAndApprovals({
+            owner: order.parameters.offerer,
+            items: order.parameters.offer,
+            criterias: offerCriteria,
+            operator: allOffererOperators[i],
+            multicallProvider: this.multicallProvider,
+          })
+        )
+      ),
+      // Get fulfiller balances and approvals of all items in the set, as offer items
+      // may be received by the fulfiller for standard fulfills
+      getBalancesAndApprovals({
+        owner: fulfillerAddress,
+        items: [...allOfferItems, ...allConsiderationItems],
+        criterias: [...allOfferCriteria, ...allConsiderationCriteria],
+        operator: fulfillerOperator,
+        multicallProvider: this.multicallProvider,
+      }),
+      this.multicallProvider.getBlock("latest"),
+      Promise.all(
+        fulfillOrderDetails.map(({ order }) =>
+          this.getOrderStatus(this.getOrderHash(order.parameters))
+        )
+      ),
+    ]);
+
+    const ordersMetadata: FulfillOrdersMetadata = fulfillOrderDetails.map(
+      (orderDetails, index) => ({
+        order: orderDetails.order,
+        unitsToFill: orderDetails.unitsToFill,
+        orderStatus: orderStatuses[index],
+        offerCriteria: orderDetails.offerCriteria ?? [],
+        considerationCriteria: orderDetails.considerationCriteria ?? [],
+        tips:
+          orderDetails.tips?.map((tip) => ({
+            ...mapInputItemToOfferItem(tip),
+            recipient: tip.recipient,
+          })) ?? [],
+        extraData: orderDetails.extraData ?? "0x",
+        offererBalancesAndApprovals: offerersBalancesAndApprovals[index],
+        offererOperator: allOffererOperators[index],
+      })
+    );
+
+    return fulfillAvailableOrdersCustom({
+      ordersMetadata,
+      seaportContract: this.contract,
+      fulfillerBalancesAndApprovals,
+      currentBlockTimestamp: currentBlock.timestamp,
+      ascendingAmountTimestampBuffer:
+        this.config.ascendingAmountFulfillmentBuffer,
+      fulfillerOperator,
+      signerAddress: fulfillerAddress,
+      conduitKey,
       recipientAddress,
       domain,
       provider: this.provider,

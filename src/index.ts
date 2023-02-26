@@ -1,5 +1,5 @@
 import { Seaport } from "./seaport";
-import { SeaportC } from "./seaportc";
+import { SeaportCustom } from "./seaportCustom";
 
 export { Seaport };
-export { SeaportC };
+export { SeaportCustom };
