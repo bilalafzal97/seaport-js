@@ -42,7 +42,7 @@ import {
   totalItemsAmount,
 } from "./utils/order";
 import { executeAllActions } from "./utils/usecase";
-import { Provider } from "@ethersproject/providers";
+import { Provider, TransactionRequest } from "@ethersproject/providers";
 import {
   ContractMethodReturnType,
   ExchangeActionCustom,
@@ -808,5 +808,51 @@ export class SeaportCustom {
       domain,
       provider: this.provider,
     });
+  }
+
+  /**
+   * Cancels a list of orders so that they are no longer fulfillable.
+   * @param orders list of order components
+   * @param accountAddress optional account address from which to cancel the orders from.
+   * @returns the set of transaction request that can be used
+   */
+  public async cancelOrdersTransactionRequest(
+    orders: OrderComponents[],
+    accountAddress?: string
+  ): Promise<TransactionRequest> {
+    if (this.signerAddress !== accountAddress) {
+      throw new Error("Invalid account address");
+    }
+
+    return {
+      from: this.signerAddress,
+      to: this.contract.address,
+      data: this.contract.interface.encodeFunctionData("cancel", [orders]),
+      nonce: await this.provider.getTransactionCount(
+        this.signerAddress as string
+      ),
+    };
+  }
+
+  /**
+   * Bulk cancels all existing orders for a given account
+   * @param offerer the account to bulk cancel orders on
+   * @returns the set of transaction methods that can be used
+   */
+  public async bulkCancelOrdersTransactionRequest(
+    offerer?: string
+  ): Promise<TransactionRequest> {
+    if (this.signerAddress !== offerer) {
+      throw new Error("Invalid account address");
+    }
+
+    return {
+      from: this.signerAddress,
+      to: this.contract.address,
+      data: this.contract.interface.encodeFunctionData("incrementCounter"),
+      nonce: await this.provider.getTransactionCount(
+        this.signerAddress as string
+      ),
+    };
   }
 }
